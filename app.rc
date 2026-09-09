@@ -1,0 +1,4 @@
+// WinTop Preview 应用图标资源（ID 1 = 应用/任务栏图标）
+#include <windows.h>
+
+1 ICON "assets/icon.ico"

@@ -1,6 +1,14 @@
 #include "wintop.h"
 #pragma comment(lib, "msimg32.lib")
 
+// 工程定义了 NOMINMAX，这里补上本地 min/max（仅本文件使用）
+#ifndef min
+#define min(a,b) (((a) < (b)) ? (a) : (b))
+#endif
+#ifndef max
+#define max(a,b) (((a) > (b)) ? (a) : (b))
+#endif
+
 #define STICKY_WIDTH    360
 #define STICKY_HEIGHT   260
 #define STICKY_PADDING  8
@@ -40,7 +48,8 @@ static void RegisterStickyNoteClass() {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = CreateSolidBrush(COLOR_NORMAL);
     wc.lpszClassName = L"WinTopStickyNote";
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadAppIcon(32);
+    wc.hIconSm = LoadAppIcon(16);
     
     g_stickyClassAtom = RegisterClassEx(&wc);
 }
@@ -159,6 +168,75 @@ static void SetFilter(StickyNote& note, COLORREF color, bool hasFilter) {
     InvalidateRect(note.hwnd, nullptr, TRUE);
 }
 
+// ─── 裁剪相关 ───
+
+// 客户端坐标 → 帧像素坐标（与显示时的伸缩映射一致，保证"框到哪显示哪"）
+static POINT ClientToFrame(StickyNote& note, POINT pt) {
+    RECT reg = PreviewRect(note.hwnd);
+    POINT out = {0, 0};
+    if (!note.frame) return out;
+    BITMAP bm;
+    GetObject(note.frame, sizeof(bm), &bm);
+    int rw = reg.right - reg.left;
+    int rh = reg.bottom - reg.top;
+    if (rw <= 0 || rh <= 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0) return out;
+    out.x = (LONG)((pt.x - reg.left) * (double)bm.bmWidth / rw);
+    out.y = (LONG)((pt.y - reg.top) * (double)bm.bmHeight / rh);
+    if (out.x < 0) out.x = 0;
+    if (out.y < 0) out.y = 0;
+    if (out.x > bm.bmWidth) out.x = bm.bmWidth;
+    if (out.y > bm.bmHeight) out.y = bm.bmHeight;
+    return out;
+}
+
+// 进入/退出裁剪选择模式
+static void BeginCrop(StickyNote& note) {
+    note.cropping = true;
+    note.hasCrop = false;
+    note.cropStart = note.cropCur = {0, 0};
+    InvalidateRect(note.hwnd, nullptr, TRUE);
+}
+
+static void CancelCrop(StickyNote& note) {
+    note.cropping = false;
+    InvalidateRect(note.hwnd, nullptr, TRUE);
+}
+
+static void ResetCrop(StickyNote& note) {
+    note.cropping = false;
+    note.hasCrop = false;
+    InvalidateRect(note.hwnd, nullptr, TRUE);
+}
+
+// 结束框选：把客户端选区映射成帧像素坐标的裁剪区
+static void EndCrop(StickyNote& note) {
+    note.cropping = false;
+    
+    RECT reg = PreviewRect(note.hwnd);
+    LONG l = min(note.cropStart.x, note.cropCur.x);
+    LONG t = min(note.cropStart.y, note.cropCur.y);
+    LONG r = max(note.cropStart.x, note.cropCur.x);
+    LONG b = max(note.cropStart.y, note.cropCur.y);
+    
+    l = max(l, reg.left);  t = max(t, reg.top);
+    r = min(r, reg.right); b = min(b, reg.bottom);
+    
+    if (!note.frame || (r - l < 8) || (b - t < 8)) {
+        InvalidateRect(note.hwnd, nullptr, TRUE);
+        return;  // 选区太小，视为取消
+    }
+    
+    POINT a = ClientToFrame(note, {l, t});
+    POINT d = ClientToFrame(note, {r, b});
+    note.cropRect.left = min(a.x, d.x);
+    note.cropRect.top = min(a.y, d.y);
+    note.cropRect.right = max(a.x, d.x);
+    note.cropRect.bottom = max(a.y, d.y);
+    note.hasCrop = true;
+    
+    InvalidateRect(note.hwnd, nullptr, TRUE);
+}
+
 // ─── 暂停 / 继续 ───
 static void TogglePause(StickyNote& note) {
     note.paused = !note.paused;
@@ -262,6 +340,11 @@ static void ShowContextMenu(HWND hwnd, StickyNote& note) {
     AppendMenu(hMenu, MF_STRING | (note.paused ? MF_CHECKED : 0), IDM_PAUSE_RESUME,
                note.paused ? L"继续预览" : L"暂停预览");
     AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hMenu, MF_STRING, IDM_CROP, note.hasCrop ? L"重新裁剪" : L"裁剪");
+    if (note.hasCrop) {
+        AppendMenu(hMenu, MF_STRING, IDM_CROP_RESET, L"恢复（取消裁剪）");
+    }
+    AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hMenu, MF_STRING, IDM_TRAY_RESTART_ADMIN, L"以管理员模式重启");
     AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hMenu, MF_STRING, IDM_CLOSE_STICKY, L"关闭预览");
@@ -294,16 +377,27 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             FillRect(hdc, &rc, bg);
             DeleteObject(bg);
             
-            // 绘制当前帧
+            // 绘制当前帧（裁剪时只显示裁剪区域）
             if (note && note->frame) {
                 HDC hdcMem = CreateCompatibleDC(hdc);
                 HBITMAP old = (HBITMAP)SelectObject(hdcMem, note->frame);
                 BITMAP bm;
                 GetObject(note->frame, sizeof(bm), &bm);
                 SetStretchBltMode(hdc, COLORONCOLOR);
-                StretchBlt(hdc, reg.left, reg.top,
-                           reg.right - reg.left, reg.bottom - reg.top,
-                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+                if (note->hasCrop) {
+                    int sw = note->cropRect.right - note->cropRect.left;
+                    int sh = note->cropRect.bottom - note->cropRect.top;
+                    if (sw > 0 && sh > 0) {
+                        StretchBlt(hdc, reg.left, reg.top,
+                                   reg.right - reg.left, reg.bottom - reg.top,
+                                   hdcMem, note->cropRect.left, note->cropRect.top,
+                                   sw, sh, SRCCOPY);
+                    }
+                } else {
+                    StretchBlt(hdc, reg.left, reg.top,
+                               reg.right - reg.left, reg.bottom - reg.top,
+                               hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+                }
                 SelectObject(hdcMem, old);
                 DeleteDC(hdcMem);
             }
@@ -356,6 +450,46 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 SelectObject(hdc, oldFont);
             }
             
+            // 裁剪框选：外圈暗化 + 高亮选区 + 提示
+            if (note && note->cropping) {
+                RECT sel = { min(note->cropStart.x, note->cropCur.x),
+                             min(note->cropStart.y, note->cropCur.y),
+                             max(note->cropStart.x, note->cropCur.x),
+                             max(note->cropStart.y, note->cropCur.y) };
+                sel.left = max(sel.left, reg.left);   sel.top = max(sel.top, reg.top);
+                sel.right = min(sel.right, reg.right); sel.bottom = min(sel.bottom, reg.bottom);
+                
+                // 外圈暗化（四块）
+                HBRUSH overlay = CreateSolidBrush(RGB(20, 20, 20));
+                RECT strips[] = {
+                    { reg.left, reg.top, sel.right, sel.top },
+                    { reg.left, sel.top, sel.left, sel.bottom },
+                    { sel.right, sel.top, reg.right, sel.bottom },
+                    { reg.left, sel.bottom, reg.right, reg.bottom }
+                };
+                for (auto& s : strips) {
+                    if (s.right > s.left && s.bottom > s.top) FillRect(hdc, &s, overlay);
+                }
+                DeleteObject(overlay);
+                
+                // 选区高亮边框
+                HPEN selPen = CreatePen(PS_DOT, 1, RGB(255, 255, 255));
+                SelectObject(hdc, selPen);
+                SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                Rectangle(hdc, sel.left, sel.top, sel.right, sel.bottom);
+                DeleteObject(selPen);
+                
+                // 提示
+                HFONT oldFont = (HFONT)SelectObject(hdc, g_hFont);
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, RGB(255, 255, 255));
+                RECT hint = { reg.left, reg.top, reg.right, reg.top + 26 };
+                FillRect(hdc, &hint, (HBRUSH)GetStockObject(DKGRAY_BRUSH));
+                DrawText(hdc, L"拖动框选裁剪区域（右键 / Esc 取消）", -1, &hint,
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(hdc, oldFont);
+            }
+            
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -389,6 +523,12 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 case IDM_PAUSE_RESUME:
                     TogglePause(*note);
                     break;
+                case IDM_CROP:
+                    BeginCrop(*note);
+                    break;
+                case IDM_CROP_RESET:
+                    ResetCrop(*note);
+                    break;
                 case IDM_TRAY_RESTART_ADMIN:
                     RestartAsAdmin(g_hMainWnd);
                     break;
@@ -404,6 +544,52 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 OnRefreshTimer(*note);
             }
             return 0;
+        }
+        
+        // 裁剪框选输入
+        case WM_LBUTTONDOWN: {
+            if (note && note->cropping) {
+                note->cropStart = note->cropCur = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                SetCapture(hwnd);
+                InvalidateRect(hwnd, nullptr, TRUE);
+            }
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            if (note && note->cropping && (GetCapture() == hwnd)) {
+                note->cropCur = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                InvalidateRect(hwnd, nullptr, TRUE);
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            if (note && note->cropping && (GetCapture() == hwnd)) {
+                ReleaseCapture();
+                EndCrop(*note);
+            }
+            return 0;
+        }
+        case WM_RBUTTONDOWN: {
+            // 裁剪选择中右键取消
+            if (note && note->cropping) {
+                CancelCrop(*note);
+                return 0;
+            }
+            break;  // 否则交给 DefWindowProc / WM_CONTEXTMENU
+        }
+        case WM_KEYDOWN: {
+            if (note && note->cropping && wParam == VK_ESCAPE) {
+                CancelCrop(*note);
+                return 0;
+            }
+            break;
+        }
+        case WM_SETCURSOR: {
+            if (note && note->cropping) {
+                SetCursor(LoadCursor(nullptr, IDC_CROSS));
+                return TRUE;
+            }
+            break;
         }
         
         case WM_CLOSE: {

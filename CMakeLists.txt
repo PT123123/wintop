@@ -15,6 +15,7 @@ add_executable(WinTopPreview WIN32
     src/WindowEnumerator.cpp
     src/PickerDialog.cpp
     src/ControlPanel.cpp
+    app.rc
 )
 
 target_include_directories(WinTopPreview PRIVATE src)

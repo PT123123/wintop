@@ -224,6 +224,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// ─── 应用图标（来自 app.rc 资源 ID 1） ───
+
+HICON LoadAppIcon(int sizePx) {
+    return static_cast<HICON>(LoadImage(g_hInst, MAKEINTRESOURCE(IDI_APP_ICON),
+                                        IMAGE_ICON, sizePx, sizePx, LR_DEFAULTCOLOR));
+}
+
 // ─── 注册主窗口类 ───
 
 static ATOM RegisterMainClass() {
@@ -231,6 +238,8 @@ static ATOM RegisterMainClass() {
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = MainWndProc;
     wc.hInstance = g_hInst;
+    wc.hIcon = LoadAppIcon(32);
+    wc.hIconSm = LoadAppIcon(16);
     wc.lpszClassName = L"WinTopPreviewMain";
     
     return RegisterClassEx(&wc);
@@ -344,7 +353,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     nid.uID = IDI_TRAY_ICON;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_APP_TRAY_ICON;
-    nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    nid.hIcon = LoadAppIcon(16);
     wcscpy_s(nid.szTip, L"WinTop Preview - 窗口预览工具");
     Shell_NotifyIcon(NIM_ADD, &nid);
     

@@ -63,6 +63,10 @@ extern int g_minimizedWaitMs;
 #define IDM_FILTER_WARM             3016
 #define IDM_FILTER_GRAY             3017
 
+// ─── 裁剪菜单 ID ───
+#define IDM_CROP                    3201
+#define IDM_CROP_RESET              3202
+
 // ─── 悬浮图标菜单 ID ───
 #define IDM_ICON_HIDE               3020
 
@@ -79,6 +83,13 @@ struct StickyNote {
     HBITMAP frame;                      // 最近一帧位图（渲染预览用）
     HWND filterWnd;                     // 颜色滤镜覆盖子窗口
 
+    // 裁剪
+    bool hasCrop;       // 是否启用裁剪
+    RECT cropRect;      // 裁剪源区域（帧像素坐标）
+    bool cropping;      // 是否正在框选裁剪区域
+    POINT cropStart;    // 框选起点（客户端坐标）
+    POINT cropCur;      // 框选当前点（客户端坐标）
+
     // 滤镜
     bool hasFilter;                     // 是否启用颜色滤镜
     COLORREF filterColor;               // 滤镜颜色
@@ -91,6 +102,8 @@ struct StickyNote {
     
     StickyNote() : hwnd(nullptr), targetHwnd(nullptr),
                    frame(nullptr), filterWnd(nullptr),
+                   hasCrop(false), cropRect{0,0,0,0}, cropping(false),
+                   cropStart{0,0}, cropCur{0,0},
                    hasFilter(false), filterColor(0),
                    isStale(false), paused(false), refreshIntervalSec(5),
                    refreshTimerId(0) {}
@@ -107,6 +120,11 @@ struct WindowInfo {
 extern HINSTANCE g_hInst;
 extern HWND g_hMainWnd;
 extern std::map<HWND, std::unique_ptr<StickyNote>> g_stickyNotes;
+
+// 应用自定义图标资源 ID（app.rc）
+#define IDI_APP_ICON  1
+// 加载应用品牌图标（32/16）的工具
+HICON LoadAppIcon(int sizePx);
 extern int g_refreshIntervalSec;
 extern int g_staleThresholdSec;
 extern HFONT g_hFont;
