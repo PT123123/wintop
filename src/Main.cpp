@@ -7,7 +7,66 @@ HWND g_hMainWnd = nullptr;
 std::map<HWND, std::unique_ptr<StickyNote>> g_stickyNotes;
 int g_refreshIntervalSec = 5;
 int g_staleThresholdSec = 10;
+int g_minimizedWaitMs = 200;
 HFONT g_hFont = nullptr;
+
+// ─── 设置持久化（注册表 HKCU\Software\WinTopPreview） ───
+
+static void LoadSettings() {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\WinTopPreview", 0, KEY_READ, &key) == ERROR_SUCCESS) {
+        DWORD data = 0;
+        DWORD size = sizeof(data);
+        if (RegQueryValueExW(key, L"MinimizedWaitMs", nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(&data), &size) == ERROR_SUCCESS) {
+            g_minimizedWaitMs = (int)data;
+            if (g_minimizedWaitMs < 30) g_minimizedWaitMs = 30;
+        }
+        RegCloseKey(key);
+    }
+}
+
+static void SaveSettings() {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\WinTopPreview", 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+        DWORD data = (DWORD)g_minimizedWaitMs;
+        RegSetValueExW(key, L"MinimizedWaitMs", 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&data), sizeof(data));
+        RegCloseKey(key);
+    }
+}
+
+static int WaitMsFromId(UINT id) {
+    switch (id) {
+        case IDM_WAIT_50:  return 50;
+        case IDM_WAIT_100: return 100;
+        case IDM_WAIT_200: return 200;
+        case IDM_WAIT_300: return 300;
+        case IDM_WAIT_500: return 500;
+        case IDM_WAIT_800: return 800;
+        case IDM_WAIT_1000: return 1000;
+    }
+    return g_minimizedWaitMs;
+}
+
+// 构建“设置”子菜单
+HMENU BuildSettingsMenu() {
+    HMENU hSet = CreatePopupMenu();
+    HMENU hWait = CreatePopupMenu();
+    struct { UINT id; int ms; } vals[] = {
+        { IDM_WAIT_50, 50 }, { IDM_WAIT_100, 100 }, { IDM_WAIT_200, 200 },
+        { IDM_WAIT_300, 300 }, { IDM_WAIT_500, 500 }, { IDM_WAIT_800, 800 },
+        { IDM_WAIT_1000, 1000 }
+    };
+    wchar_t buf[32];
+    for (auto& v : vals) {
+        wsprintf(buf, L"%d ms", v.ms);
+        AppendMenu(hWait, MF_STRING | (g_minimizedWaitMs == v.ms ? MF_CHECKED : 0), v.id, buf);
+    }
+    AppendMenu(hSet, MF_POPUP, reinterpret_cast<UINT_PTR>(hWait), L"最小化恢复抓帧等待时长");
+    return hSet;
+}
 
 // ─── 注册全局热键 ───
 
@@ -49,6 +108,28 @@ static void DestroyAllStickyNotes() {
     g_stickyNotes.clear();
 }
 
+// ─── 以管理员模式重启 ───
+
+void RestartAsAdmin(HWND hwnd) {
+    wchar_t path[MAX_PATH];
+    if (!GetModuleFileName(nullptr, path, MAX_PATH)) return;
+    
+    SHELLEXECUTEINFO sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"runas";   // 触发 UAC 提权
+    sei.lpFile = path;
+    sei.nShow = SW_SHOWNORMAL;
+    
+    if (ShellExecuteEx(&sei)) {
+        // 管理员实例已启动，退出当前实例
+        PostMessage(hwnd, WM_COMMAND, IDM_TRAY_EXIT, 0);
+    } else {
+        MessageBox(nullptr, L"无法以管理员身份重新启动（可能已取消）。",
+                   L"WinTop Preview", MB_OK | MB_ICONERROR);
+    }
+}
+
 // ─── 主窗口过程 ───
 
 LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -71,6 +152,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 AppendMenu(hMenu, MF_STRING, IDM_TRAY_SHOW_PANEL, L"显示悬浮图标");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
                 AppendMenu(hMenu, MF_STRING, IDM_TRAY_DESTROY_ALL, L"关闭所有便签");
+                AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+                AppendMenu(hMenu, MF_STRING, IDM_TRAY_RESTART_ADMIN, L"以管理员模式重启");
+                AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+                HMENU hSettings = BuildSettingsMenu();
+                AppendMenu(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hSettings), L"设置");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
                 AppendMenu(hMenu, MF_STRING, IDM_TRAY_EXIT, L"退出");
                 
@@ -96,6 +182,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     break;
                 case IDM_TRAY_DESTROY_ALL:
                     DestroyAllStickyNotes();
+                    break;
+                case IDM_TRAY_RESTART_ADMIN:
+                    RestartAsAdmin(hwnd);
+                    break;
+                case IDM_WAIT_50: case IDM_WAIT_100: case IDM_WAIT_200:
+                case IDM_WAIT_300: case IDM_WAIT_500: case IDM_WAIT_800:
+                case IDM_WAIT_1000:
+                    g_minimizedWaitMs = WaitMsFromId(LOWORD(wParam));
+                    SaveSettings();
                     break;
                 case IDM_TRAY_EXIT:
                     DestroyWindow(hwnd);
@@ -195,6 +290,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                       _In_ LPWSTR lpCmdLine,
                       _In_ int nCmdShow) {
     g_hInst = hInstance;
+    
+    // 加载设置（最小化恢复抓帧等待时长等）
+    LoadSettings();
     
     // 解析命令行
     int argc;

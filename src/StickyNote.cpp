@@ -1,8 +1,9 @@
 #include "wintop.h"
+#pragma comment(lib, "msimg32.lib")
 
-#define STICKY_WIDTH  320
-#define STICKY_HEIGHT 240
-#define STICKY_PADDING 8
+#define STICKY_WIDTH    360
+#define STICKY_HEIGHT   260
+#define STICKY_PADDING  8
 #define FILTER_ALPHA    70
 
 #define COLOR_NORMAL    RGB(40, 40, 40)
@@ -17,7 +18,6 @@
 #define FILTER_GRAY     RGB(120, 120, 120)
 
 static ATOM g_stickyClassAtom = 0;
-static ATOM g_filterClassAtom = 0;
 
 // ─── 预览区域（客户端减去内边距） ───
 static RECT PreviewRect(HWND hwnd) {
@@ -26,36 +26,6 @@ static RECT PreviewRect(HWND hwnd) {
     RECT reg = { STICKY_PADDING, STICKY_PADDING,
                  rc.right - STICKY_PADDING, rc.bottom - STICKY_PADDING };
     return reg;
-}
-
-// ─── 滤镜覆盖子窗口过程：纯色半透明 ───
-static LRESULT CALLBACK FilterWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hwnd, &ps);
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            COLORREF color = (COLORREF)GetWindowLongPtr(hwnd, GWLP_USERDATA);
-            HBRUSH br = CreateSolidBrush(color);
-            FillRect(hdc, &rc, br);
-            DeleteObject(br);
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-    }
-    return DefWindowProc(hwnd, msg, wParam, lParam);
-}
-
-static void RegisterFilterClass() {
-    if (g_filterClassAtom) return;
-    WNDCLASSEX wc = {};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = FilterWndProc;
-    wc.hInstance = g_hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"WinTopFilter";
-    g_filterClassAtom = RegisterClassEx(&wc);
 }
 
 // ─── 注册便签窗口类 ───
@@ -78,7 +48,6 @@ static void RegisterStickyNoteClass() {
 // ─── 创建便签窗口 ───
 HWND CreateStickyNoteWindow(HWND hParent) {
     RegisterStickyNoteClass();
-    RegisterFilterClass();
     
     int x = 100 + (rand() % 400);
     int y = 100 + (rand() % 300);
@@ -93,14 +62,6 @@ HWND CreateStickyNoteWindow(HWND hParent) {
     );
     
     if (hwnd) {
-        RECT reg = PreviewRect(hwnd);
-        
-        // 滤镜覆盖子窗口（半透明，位于缩略图之上）
-        CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_LAYERED, L"WinTopFilter", L"",
-                        WS_CHILD, reg.left, reg.top,
-                        reg.right - reg.left, reg.bottom - reg.top,
-                        hwnd, nullptr, g_hInst, nullptr);
-        
         ShowWindow(hwnd, SW_SHOW);
     }
     
@@ -116,41 +77,35 @@ static void SetRefreshTimer(StickyNote& note) {
                                     note.refreshIntervalSec * 1000, nullptr);
 }
 
-// ─── 更新/显隐滤镜子窗口 ───
-static void UpdateFilterWindow(StickyNote& note) {
-    if (!note.filterWnd) return;
-    if (note.hasFilter) {
-        SetWindowLongPtr(note.filterWnd, GWLP_USERDATA, (LONG_PTR)note.filterColor);
-        SetLayeredWindowAttributes(note.filterWnd, 0, FILTER_ALPHA, LWA_ALPHA);
-        ShowWindow(note.filterWnd, SW_SHOW);
-        InvalidateRect(note.filterWnd, nullptr, TRUE);
-    } else {
-        ShowWindow(note.filterWnd, SW_HIDE);
+// ─── 抓取目标窗口当前内容为新位图（全窗口，含边框） ───
+static HBITMAP CaptureWindowContent(HWND target) {
+    RECT wrc;
+    GetWindowRect(target, &wrc);
+    int w = wrc.right - wrc.left;
+    int h = wrc.bottom - wrc.top;
+    if (w <= 0 || h <= 0) return nullptr;
+    
+    HDC hdcScreen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(hdcScreen);
+    HBITMAP bmp = CreateCompatibleBitmap(hdcScreen, w, h);
+    HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
+    
+    // 优先 PrintWindow：能拿到目标自身内容（含被遮挡/需重绘时）
+    BOOL ok = PrintWindow(target, mem, PW_RENDERFULLCONTENT);
+    if (!ok) {
+        // 回退：屏幕区域抓取
+        ok = BitBlt(mem, 0, 0, w, h, hdcScreen, wrc.left, wrc.top, SRCCOPY);
     }
-}
-
-// ─── 更新 DWM 缩略图（随状态显隐：暂停/停滞时隐藏） ───
-void UpdateStickyNoteThumbnail(StickyNote& note) {
-    if (!note.thumbnailId) return;
     
-    RECT reg = PreviewRect(note.hwnd);
+    SelectObject(mem, old);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, hdcScreen);
     
-    DWM_THUMBNAIL_PROPERTIES props = {};
-    props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
-    props.rcDestination = reg;
-    props.fVisible = (note.thumbnailId != nullptr) && !note.paused && !note.isStale;
-    props.opacity = 255;
-    props.fSourceClientAreaOnly = TRUE;
-    
-    DwmUpdateThumbnailProperties(note.thumbnailId, &props);
-    
-    // 滤镜窗口覆盖在缩略图区域之上
-    if (note.filterWnd) {
-        SetWindowPos(note.filterWnd, nullptr, reg.left, reg.top,
-                     reg.right - reg.left, reg.bottom - reg.top,
-                     SWP_NOZORDER);
-        UpdateFilterWindow(note);
+    if (!ok) {
+        DeleteObject(bmp);
+        return nullptr;
     }
+    return bmp;
 }
 
 // ─── 绑定目标窗口 ───
@@ -164,23 +119,20 @@ void BindStickyNoteToWindow(StickyNote& note, HWND targetHwnd) {
     
     SetWindowText(note.hwnd, (L"[预览] " + note.targetTitle).c_str());
     
-    // 取得子窗口
-    note.filterWnd = FindWindowEx(note.hwnd, nullptr, L"WinTopFilter", nullptr);
-    
-    // 注册 DWM 缩略图
-    if (note.thumbnailId) {
-        DwmUnregisterThumbnail(note.thumbnailId);
-        note.thumbnailId = nullptr;
-    }
-    HRESULT hr = DwmRegisterThumbnail(note.hwnd, targetHwnd, &note.thumbnailId);
-    if (SUCCEEDED(hr)) {
-        UpdateStickyNoteThumbnail(note);
-    }
-    
+    note.filterWnd = nullptr;
     note.isStale = false;
     note.paused = false;
     
-    // 启动刷新定时器（驱动停滞检测与最小化刷新）
+    // 立即抓首帧
+    HBITMAP bmp = CaptureWindowContent(targetHwnd);
+    if (bmp) {
+        if (note.frame) DeleteObject(note.frame);
+        note.frame = bmp;
+    }
+    
+    InvalidateRect(note.hwnd, nullptr, TRUE);
+    
+    // 启动刷新定时器
     SetRefreshTimer(note);
 }
 
@@ -190,9 +142,9 @@ void DestroyStickyNote(StickyNote& note) {
         KillTimer(note.hwnd, note.refreshTimerId);
         note.refreshTimerId = 0;
     }
-    if (note.thumbnailId) {
-        DwmUnregisterThumbnail(note.thumbnailId);
-        note.thumbnailId = nullptr;
+    if (note.frame) {
+        DeleteObject(note.frame);
+        note.frame = nullptr;
     }
     if (note.hwnd) {
         DestroyWindow(note.hwnd);
@@ -204,74 +156,73 @@ void DestroyStickyNote(StickyNote& note) {
 static void SetFilter(StickyNote& note, COLORREF color, bool hasFilter) {
     note.filterColor = color;
     note.hasFilter = hasFilter;
-    UpdateStickyNoteThumbnail(note);
+    InvalidateRect(note.hwnd, nullptr, TRUE);
 }
 
 // ─── 暂停 / 继续 ───
 static void TogglePause(StickyNote& note) {
     note.paused = !note.paused;
-    if (!note.paused) {
-        // 继续：重启定时器并立即刷新
-        SetRefreshTimer(note);
-        UpdateStickyNoteThumbnail(note);
-    } else {
-        // 暂停：隐藏缩略图，保留其余
+    if (note.paused) {
+        // 暂停：停掉刷新定时器，画面冻结在上一帧
         if (note.refreshTimerId) {
             KillTimer(note.hwnd, note.refreshTimerId);
             note.refreshTimerId = 0;
         }
-        UpdateStickyNoteThumbnail(note);
+    } else {
+        SetRefreshTimer(note);
+        InvalidateRect(note.hwnd, nullptr, TRUE);
     }
-    InvalidateRect(note.hwnd, nullptr, TRUE);
 }
 
-// ─── 目标窗口最小化时的强制刷新 ───
-static void RefreshMinimized(StickyNote& note) {
-    // 最小化窗口不渲染新帧，唯一办法是无激活恢复→让 DWM 渲染→再最小化。
-    if (!IsIconic(note.targetHwnd)) return;
+// ─── 每次刷新：抓一帧新画面（对最小化窗口先恢复再抓再最小化） ───
+static void RefreshFrame(StickyNote& note) {
+    if (!note.targetHwnd || note.paused) return;
     
-    ShowWindow(note.targetHwnd, SW_SHOWNOACTIVATE);  // 不抢焦点
-    // 等待窗口真正恢复并渲染
-    for (int i = 0; i < 5; i++) {
-        if (!IsIconic(note.targetHwnd)) break;
-        Sleep(30);
+    bool wasMinimized = IsIconic(note.targetHwnd);
+    bool visible = IsWindowVisible(note.targetHwnd);
+    
+    if (wasMinimized) {
+        // 最小化窗口不渲染：先无激活恢复，等它真正绘制（等待时长可在设置中调节），再抓帧
+        ShowWindow(note.targetHwnd, SW_SHOWNOACTIVATE);
+        DWORD start = GetTickCount();
+        while (GetTickCount() - start < (DWORD)g_minimizedWaitMs) {
+            Sleep(15);
+        }
+        visible = IsWindowVisible(note.targetHwnd);
     }
-    if (note.thumbnailId) {
-        UpdateStickyNoteThumbnail(note);
+    
+    if (!visible && !wasMinimized) {
+        // 目标被隐藏（非最小化）：显示空白
+        if (note.frame) { DeleteObject(note.frame); note.frame = nullptr; }
+        InvalidateRect(note.hwnd, nullptr, TRUE);
+    } else {
+        HBITMAP bmp = CaptureWindowContent(note.targetHwnd);
+        if (bmp) {
+            if (note.frame) DeleteObject(note.frame);
+            note.frame = bmp;
+            InvalidateRect(note.hwnd, nullptr, TRUE);
+        }
     }
-    // 重新最小化（不激活）
-    ShowWindow(note.targetHwnd, SW_MINIMIZE);
+    
+    if (wasMinimized) {
+        // 抓完再最小化回去
+        ShowWindow(note.targetHwnd, SW_MINIMIZE);
+    }
 }
 
-// ─── 每次刷新：停滞检测 + 最小化处理 ───
+// ─── 停滞检测 + 刷新 ───
 static void OnRefreshTimer(StickyNote& note) {
     if (!note.targetHwnd || note.paused) return;
     
-    // 停滞判定：目标窗口是否失去响应（卡死）
     bool wasStale = note.isStale;
     DWORD_PTR res = 0;
     BOOL responded = (BOOL)SendMessageTimeout(note.targetHwnd, WM_NULL, 0, 0,
                                               SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, &res);
     note.isStale = (responded == 0);
     
-    if (IsIconic(note.targetHwnd)) {
-        // 最小化：强制刷新取新帧
-        RefreshMinimized(note);
-    } else if (!IsWindowVisible(note.targetHwnd)) {
-        // 目标被隐藏：隐藏缩略图避免误导
-        if (note.thumbnailId) {
-            DWM_THUMBNAIL_PROPERTIES p = {};
-            p.dwFlags = DWM_TNP_VISIBLE;
-            p.fVisible = FALSE;
-            DwmUpdateThumbnailProperties(note.thumbnailId, &p);
-        }
-    } else {
-        // 正常：随需要更新缩略图（DWM 自动实时）
-        UpdateStickyNoteThumbnail(note);
-    }
+    RefreshFrame(note);
     
     if (note.isStale != wasStale) {
-        UpdateStickyNoteThumbnail(note);
         InvalidateRect(note.hwnd, nullptr, TRUE);
     }
 }
@@ -311,6 +262,8 @@ static void ShowContextMenu(HWND hwnd, StickyNote& note) {
     AppendMenu(hMenu, MF_STRING | (note.paused ? MF_CHECKED : 0), IDM_PAUSE_RESUME,
                note.paused ? L"继续预览" : L"暂停预览");
     AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hMenu, MF_STRING, IDM_TRAY_RESTART_ADMIN, L"以管理员模式重启");
+    AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hMenu, MF_STRING, IDM_CLOSE_STICKY, L"关闭预览");
     
     POINT pt;
@@ -337,10 +290,23 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             GetClientRect(hwnd, &rc);
             RECT reg = PreviewRect(hwnd);
             
-            // 背景
             HBRUSH bg = CreateSolidBrush(COLOR_NORMAL);
             FillRect(hdc, &rc, bg);
             DeleteObject(bg);
+            
+            // 绘制当前帧
+            if (note && note->frame) {
+                HDC hdcMem = CreateCompatibleDC(hdc);
+                HBITMAP old = (HBITMAP)SelectObject(hdcMem, note->frame);
+                BITMAP bm;
+                GetObject(note->frame, sizeof(bm), &bm);
+                SetStretchBltMode(hdc, COLORONCOLOR);
+                StretchBlt(hdc, reg.left, reg.top,
+                           reg.right - reg.left, reg.bottom - reg.top,
+                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+                SelectObject(hdcMem, old);
+                DeleteDC(hdcMem);
+            }
             
             // 边框
             HPEN pen = CreatePen(PS_SOLID, 1, COLOR_BORDER);
@@ -349,23 +315,45 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             Rectangle(hdc, reg.left, reg.top, reg.right, reg.bottom);
             DeleteObject(pen);
             
-            // 停滞 / 暂停状态文字（此时缩略图已隐藏，文字可见）
-            if (note && note->isStale && !note->paused) {
-                HBRUSH sr = CreateSolidBrush(COLOR_STALE);
-                FillRect(hdc, &reg, sr);
-                DeleteObject(sr);
+            // 颜色滤镜（半透明覆盖在画面上）
+            if (note && note->hasFilter) {
+                int fw = reg.right - reg.left;
+                int fh = reg.bottom - reg.top;
+                HDC mem = CreateCompatibleDC(hdc);
+                HBITMAP cb = CreateCompatibleBitmap(hdc, fw, fh);
+                HBITMAP oldBmp = (HBITMAP)SelectObject(mem, cb);
+                HBRUSH fb = CreateSolidBrush(note->filterColor);
+                RECT frc = { 0, 0, fw, fh };
+                FillRect(mem, &frc, fb);
+                DeleteObject(fb);
+                BLENDFUNCTION bf = {};
+                bf.BlendOp = AC_SRC_OVER;
+                bf.SourceConstantAlpha = FILTER_ALPHA;
+                AlphaBlend(hdc, reg.left, reg.top, fw, fh, mem, 0, 0, fw, fh, bf);
+                SelectObject(mem, oldBmp);
+                DeleteObject(cb);
+                DeleteDC(mem);
+            }
+            
+            // 状态横幅（停滞 / 暂停）
+            if (note) {
+                HFONT oldFont = (HFONT)SelectObject(hdc, g_hFont);
                 SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(255, 255, 255));
-                SelectObject(hdc, g_hFont);
-                DrawText(hdc, L"[画面停滞]", -1, &reg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            } else if (note && note->paused) {
-                HBRUSH pr = CreateSolidBrush(COLOR_PAUSED);
-                FillRect(hdc, &reg, pr);
-                DeleteObject(pr);
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(255, 255, 255));
-                SelectObject(hdc, g_hFont);
-                DrawText(hdc, L"[已暂停]", -1, &reg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                RECT banner = { reg.left, reg.top, reg.right, reg.top + 26 };
+                if (note->isStale && !note->paused) {
+                    HBRUSH sr = CreateSolidBrush(COLOR_STALE);
+                    FillRect(hdc, &banner, sr);
+                    DeleteObject(sr);
+                    SetTextColor(hdc, RGB(255, 255, 255));
+                    DrawText(hdc, L"[画面停滞]", -1, &banner, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                } else if (note->paused) {
+                    HBRUSH pr = CreateSolidBrush(COLOR_PAUSED);
+                    FillRect(hdc, &banner, pr);
+                    DeleteObject(pr);
+                    SetTextColor(hdc, RGB(255, 255, 255));
+                    DrawText(hdc, L"[已暂停]", -1, &banner, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+                SelectObject(hdc, oldFont);
             }
             
             EndPaint(hwnd, &ps);
@@ -373,9 +361,7 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         }
         
         case WM_SIZE: {
-            if (note) {
-                UpdateStickyNoteThumbnail(*note);
-            }
+            InvalidateRect(hwnd, nullptr, TRUE);
             return 0;
         }
         
@@ -403,6 +389,9 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 case IDM_PAUSE_RESUME:
                     TogglePause(*note);
                     break;
+                case IDM_TRAY_RESTART_ADMIN:
+                    RestartAsAdmin(g_hMainWnd);
+                    break;
                 case IDM_CLOSE_STICKY:
                     PostMessage(hwnd, WM_CLOSE, 0, 0);
                     break;
@@ -424,9 +413,9 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                     KillTimer(self, note->refreshTimerId);
                     note->refreshTimerId = 0;
                 }
-                if (note->thumbnailId) {
-                    DwmUnregisterThumbnail(note->thumbnailId);
-                    note->thumbnailId = nullptr;
+                if (note->frame) {
+                    DeleteObject(note->frame);
+                    note->frame = nullptr;
                 }
                 note->hwnd = nullptr;
                 g_stickyNotes.erase(self);

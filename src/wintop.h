@@ -35,6 +35,18 @@
 #define IDM_TRAY_SHOW_PANEL         2002
 #define IDM_TRAY_DESTROY_ALL        2003
 #define IDM_TRAY_EXIT               2004
+#define IDM_TRAY_RESTART_ADMIN      2005
+#define IDM_TRAY_SETTINGS           2006
+
+// ─── 设置：最小化恢复抓帧等待时长（毫秒） ───
+#define IDM_WAIT_50     3101
+#define IDM_WAIT_100    3102
+#define IDM_WAIT_200    3103
+#define IDM_WAIT_300    3104
+#define IDM_WAIT_500    3105
+#define IDM_WAIT_800    3106
+#define IDM_WAIT_1000   3107
+extern int g_minimizedWaitMs;
 
 // ─── 右键菜单 ID ───
 #define IDM_REFRESH_1S              3001
@@ -64,10 +76,9 @@ struct StickyNote {
     HWND targetHwnd;                    // 目标窗口句柄
     std::wstring targetTitle;           // 目标窗口标题
     
-    HTHUMBNAIL thumbnailId;             // DWM 缩略图 ID（实时渲染源窗口）
+    HBITMAP frame;                      // 最近一帧位图（渲染预览用）
     HWND filterWnd;                     // 颜色滤镜覆盖子窗口
-    HWND tintWnd;                       // 暂停/停滞的半透明遮罩子窗口
-    
+
     // 滤镜
     bool hasFilter;                     // 是否启用颜色滤镜
     COLORREF filterColor;               // 滤镜颜色
@@ -79,7 +90,7 @@ struct StickyNote {
     UINT_PTR refreshTimerId;            // 该便签的刷新定时器 ID
     
     StickyNote() : hwnd(nullptr), targetHwnd(nullptr),
-                   thumbnailId(nullptr), filterWnd(nullptr), tintWnd(nullptr),
+                   frame(nullptr), filterWnd(nullptr),
                    hasFilter(false), filterColor(0),
                    isStale(false), paused(false), refreshIntervalSec(5),
                    refreshTimerId(0) {}
@@ -108,7 +119,6 @@ std::vector<WindowInfo> EnumerateVisibleWindows();
 // StickyNote.cpp
 HWND CreateStickyNoteWindow(HWND hParent);
 void BindStickyNoteToWindow(StickyNote& note, HWND targetHwnd);
-void UpdateStickyNoteThumbnail(StickyNote& note);
 void DestroyStickyNote(StickyNote& note);
 LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -125,3 +135,5 @@ void DestroyControlPanel();
 void RegisterHotKeys(HWND hwnd);
 void UnregisterHotKeys(HWND hwnd);
 void CreateAndBindStickyNote(HWND targetHwnd);
+void RestartAsAdmin(HWND hwnd);
+HMENU BuildSettingsMenu();

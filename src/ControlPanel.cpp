@@ -26,6 +26,11 @@ static void ShowIconMenu(HWND hwnd) {
     AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hMenu, MF_STRING, IDM_ICON_HIDE, L"隐藏此图标");
     AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hMenu, MF_STRING, IDM_TRAY_RESTART_ADMIN, L"以管理员模式重启");
+    AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+    HMENU hSettings = BuildSettingsMenu();
+    AppendMenu(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hSettings), L"设置");
+    AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hMenu, MF_STRING, IDM_TRAY_EXIT, L"退出");
     
     POINT pt;
@@ -141,6 +146,14 @@ static LRESULT CALLBACK PanelWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                     break;
                 case IDM_ICON_HIDE:
                     ShowWindow(hwnd, SW_HIDE);
+                    break;
+                case IDM_TRAY_RESTART_ADMIN:
+                    RestartAsAdmin(g_hMainWnd);
+                    break;
+                case IDM_WAIT_50: case IDM_WAIT_100: case IDM_WAIT_200:
+                case IDM_WAIT_300: case IDM_WAIT_500: case IDM_WAIT_800:
+                case IDM_WAIT_1000:
+                    PostMessage(g_hMainWnd, WM_COMMAND, LOWORD(wParam), 0);
                     break;
                 case IDM_TRAY_EXIT:
                     PostMessage(g_hMainWnd, WM_CLOSE, 0, 0);
