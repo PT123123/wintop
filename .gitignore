@@ -1,0 +1,12 @@
+# Build output
+/build/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.tlog
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.user
+CMakeFiles/
