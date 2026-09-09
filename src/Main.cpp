@@ -8,6 +8,7 @@ std::map<HWND, std::unique_ptr<StickyNote>> g_stickyNotes;
 int g_refreshIntervalSec = 5;
 int g_staleThresholdSec = 10;
 int g_minimizedWaitMs = 200;
+int g_warningSamples = 8;
 HFONT g_hFont = nullptr;
 
 // ─── 设置持久化（注册表 HKCU\Software\WinTopPreview） ───
@@ -22,6 +23,11 @@ static void LoadSettings() {
             g_minimizedWaitMs = (int)data;
             if (g_minimizedWaitMs < 30) g_minimizedWaitMs = 30;
         }
+        if (RegQueryValueExW(key, L"WarningSamples", nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(&data), &size) == ERROR_SUCCESS) {
+            g_warningSamples = (int)data;
+            if (g_warningSamples < 3 || g_warningSamples > 60) g_warningSamples = 8;
+        }
         RegCloseKey(key);
     }
 }
@@ -32,6 +38,9 @@ static void SaveSettings() {
                         KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
         DWORD data = (DWORD)g_minimizedWaitMs;
         RegSetValueExW(key, L"MinimizedWaitMs", 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&data), sizeof(data));
+        data = (DWORD)g_warningSamples;
+        RegSetValueExW(key, L"WarningSamples", 0, REG_DWORD,
                        reinterpret_cast<const BYTE*>(&data), sizeof(data));
         RegCloseKey(key);
     }
@@ -65,6 +74,19 @@ HMENU BuildSettingsMenu() {
         AppendMenu(hWait, MF_STRING | (g_minimizedWaitMs == v.ms ? MF_CHECKED : 0), v.id, buf);
     }
     AppendMenu(hSet, MF_POPUP, reinterpret_cast<UINT_PTR>(hWait), L"最小化恢复抓帧等待时长");
+
+    // 警戒色标采样次数：到达最高警戒级别所需的无变化采样次数
+    HMENU hWarn = CreatePopupMenu();
+    struct { UINT id; int n; } wvals[] = {
+        { IDM_WARN_3, 3 }, { IDM_WARN_5, 5 }, { IDM_WARN_8, 8 },
+        { IDM_WARN_12, 12 }, { IDM_WARN_20, 20 }, { IDM_WARN_40, 40 }
+    };
+    for (auto& w : wvals) {
+        wsprintf(buf, L"%d 次", w.n);
+        AppendMenu(hWarn, MF_STRING | (g_warningSamples == w.n ? MF_CHECKED : 0), w.id, buf);
+    }
+    AppendMenu(hSet, MF_POPUP, reinterpret_cast<UINT_PTR>(hWarn),
+               L"警戒色标·到达最高级别所需采样次数");
     return hSet;
 }
 
@@ -192,6 +214,12 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     g_minimizedWaitMs = WaitMsFromId(LOWORD(wParam));
                     SaveSettings();
                     break;
+                case IDM_WARN_3:  g_warningSamples = 3;  SaveSettings(); break;
+                case IDM_WARN_5:  g_warningSamples = 5;  SaveSettings(); break;
+                case IDM_WARN_8:  g_warningSamples = 8;  SaveSettings(); break;
+                case IDM_WARN_12: g_warningSamples = 12; SaveSettings(); break;
+                case IDM_WARN_20: g_warningSamples = 20; SaveSettings(); break;
+                case IDM_WARN_40: g_warningSamples = 40; SaveSettings(); break;
                 case IDM_TRAY_EXIT:
                     DestroyWindow(hwnd);
                     break;

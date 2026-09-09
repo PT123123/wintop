@@ -1,4 +1,6 @@
 #include "wintop.h"
+#include <cmath>
+#include <cstring>
 #pragma comment(lib, "msimg32.lib")
 
 // 工程定义了 NOMINMAX，这里补上本地 min/max（仅本文件使用）
@@ -8,6 +10,9 @@
 #ifndef max
 #define max(a,b) (((a) > (b)) ? (a) : (b))
 #endif
+
+// 前置声明（定义在文件后部）
+static void FreeHueWarningBuf(StickyNote& note);
 
 #define STICKY_WIDTH    360
 #define STICKY_HEIGHT   260
@@ -155,6 +160,7 @@ void DestroyStickyNote(StickyNote& note) {
         DeleteObject(note.frame);
         note.frame = nullptr;
     }
+    FreeHueWarningBuf(note);
     if (note.hwnd) {
         DestroyWindow(note.hwnd);
         note.hwnd = nullptr;
@@ -162,10 +168,129 @@ void DestroyStickyNote(StickyNote& note) {
 }
 
 // ─── 设置滤镜 ───
+static void FreeHueWarningBuf(StickyNote& note) {
+    if (note.diffBuf) { delete[] note.diffBuf; note.diffBuf = nullptr; }
+    note.diffW = note.diffH = 0;
+}
+
 static void SetFilter(StickyNote& note, COLORREF color, bool hasFilter) {
     note.filterColor = color;
     note.hasFilter = hasFilter;
+    note.useHueWarning = false;
+    FreeHueWarningBuf(note);
     InvalidateRect(note.hwnd, nullptr, TRUE);
+}
+
+// 启用/停用"色相渐变警戒色标"
+static void SetHueWarning(StickyNote& note, bool on) {
+    note.useHueWarning = on;
+    note.hasFilter = false;
+    note.warningLevel = 0.0f;
+    if (!on) { FreeHueWarningBuf(note); }
+    InvalidateRect(note.hwnd, nullptr, TRUE);
+}
+
+// ─── 色相渐变警戒色标：由画面变化程度计算警戒颜色 ───
+
+// HSB -> RGB
+static COLORREF HSBtoRGB(double h, double s, double v) {
+    double r = 0, g = 0, b = 0;
+    h = std::fmod(h, 360.0); if (h < 0) h += 360.0;
+    int i = (int)(h / 60) % 6;
+    double f = h / 60 - i;
+    double p = v * (1 - s);
+    double q = v * (1 - f * s);
+    double t = v * (1 - (1 - f) * s);
+    switch (i) {
+        case 0: r = v; g = t; b = p; break;
+        case 1: r = q; g = v; b = p; break;
+        case 2: r = p; g = v; b = t; break;
+        case 3: r = p; g = q; b = v; break;
+        case 4: r = t; g = p; b = v; break;
+        case 5: r = v; g = p; b = q; break;
+    }
+    return RGB((BYTE)(r * 255 + 0.5), (BYTE)(g * 255 + 0.5), (BYTE)(b * 255 + 0.5));
+}
+
+// 警戒级别 level(0..1) -> 色相：安全为绿(120°)，随级别升高向红(0°)渐变，最高警戒为红
+static COLORREF HueColorFromLevel(float level) {
+    double h = (1.0 - level) * 120.0;   // 0 -> 绿，1 -> 红
+    return HSBtoRGB(h, 0.82, 0.92);
+}
+
+// 把当前帧缩成 48 宽的单通道亮度缩略帧，与上一帧对比变化量并更新警戒级别
+static const int kDiffWidth = 48;
+
+static void UpdateHueWarning(StickyNote& note) {
+    if (!note.useHueWarning || !note.frame) return;
+    
+    BITMAP bm;
+    GetObject(note.frame, sizeof(bm), &bm);
+    if (bm.bmWidth <= 0 || bm.bmHeight <= 0) return;
+    int DH = (int)((long long)bm.bmHeight * kDiffWidth / bm.bmWidth);
+    if (DH < 1) DH = 1;
+    int n = kDiffWidth * DH;
+    int stride = kDiffWidth * 3;
+    
+    // 生成该帧的 24bpp 顶层 DIB 缩略图（读像素用）
+    std::vector<BYTE> cur((size_t)n);
+    std::vector<BYTE> rgb((size_t)stride * DH);
+    {
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = kDiffWidth;
+        bi.bmiHeader.biHeight = -DH;              // 顶层 DIB
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 24;
+        bi.bmiHeader.biCompression = BI_RGB;
+        HDC dstDC = CreateCompatibleDC(nullptr);
+        HBITMAP dib = CreateDIBSection(dstDC, &bi, DIB_RGB_COLORS, (void**)rgb.data(), nullptr, 0);
+        HBITMAP oldDib = (HBITMAP)SelectObject(dstDC, dib);
+        HDC srcDC = CreateCompatibleDC(dstDC);
+        HBITMAP oldSrc = (HBITMAP)SelectObject(srcDC, note.frame);
+        SetStretchBltMode(dstDC, COLORONCOLOR);
+        StretchBlt(dstDC, 0, 0, kDiffWidth, DH, srcDC, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+        GdiFlush();
+        SelectObject(srcDC, oldSrc); DeleteDC(srcDC);
+        SelectObject(dstDC, oldDib); DeleteObject(dib); DeleteDC(dstDC);
+        for (int y = 0; y < DH; ++y) {
+            const BYTE* row = rgb.data() + (size_t)y * stride;
+            BYTE* out = cur.data() + (size_t)y * kDiffWidth;
+            for (int x = 0; x < kDiffWidth; ++x) {
+                const BYTE* p = row + x * 3;      // 24bpp 内存序为 B,G,R
+                out[x] = (BYTE)((p[0] * 11 + p[1] * 59 + p[2] * 30) / 100);
+            }
+        }
+    }
+    
+    // 与上一帧缩略图对比，计算变化量 0..1
+    double diff = 1.0;   // 首帧默认视为有变化（安全）
+    if (note.diffBuf && note.diffW == kDiffWidth && note.diffH == DH) {
+        long long sum = 0;
+        for (int i = 0; i < n; ++i) {
+            int d = cur[i] - note.diffBuf[i];
+            if (d < 0) d = -d;
+            sum += d;
+        }
+        diff = sum / (double)n / 255.0;
+    }
+    
+    // 需要先扩容/建缓存
+    if (!note.diffBuf || note.diffW != kDiffWidth || note.diffH != DH) {
+        if (note.diffBuf) delete[] note.diffBuf;
+        note.diffBuf = new BYTE[n];
+        note.diffW = kDiffWidth;
+        note.diffH = DH;
+    }
+    memcpy(note.diffBuf, cur.data(), (size_t)n);
+    
+    // 指数平滑逼近目标：目标 = 1 - 变化量。g_warningSamples 越大，到达最高警戒越慢
+    double target = 1.0 - diff;
+    int k = (g_warningSamples > 0) ? g_warningSamples : 8;
+    double alpha = 1.0 - std::exp(-1.0 / k);
+    note.warningLevel = (float)(note.warningLevel + (target - note.warningLevel) * alpha);
+    if (note.warningLevel < 0.0f) note.warningLevel = 0.0f;
+    if (note.warningLevel > 1.0f) note.warningLevel = 1.0f;
 }
 
 // ─── 裁剪相关 ───
@@ -278,6 +403,7 @@ static void RefreshFrame(StickyNote& note) {
         if (bmp) {
             if (note.frame) DeleteObject(note.frame);
             note.frame = bmp;
+            if (note.useHueWarning) UpdateHueWarning(note);   // 采集到位后更新警戒级别
             InvalidateRect(note.hwnd, nullptr, TRUE);
         }
     }
@@ -329,13 +455,15 @@ static void ShowContextMenu(HWND hwnd, StickyNote& note) {
     AppendMenu(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hRefreshMenu), L"刷新频率");
     
     HMENU hFilterMenu = CreatePopupMenu();
-    AppendMenu(hFilterMenu, MF_STRING | (!note.hasFilter ? MF_CHECKED : 0), IDM_FILTER_NONE,  L"无");
+    AppendMenu(hFilterMenu, MF_STRING | (!note.hasFilter && !note.useHueWarning ? MF_CHECKED : 0), IDM_FILTER_NONE,  L"无");
     AppendMenu(hFilterMenu, MF_STRING | (note.hasFilter && note.filterColor == FILTER_RED   ? MF_CHECKED : 0), IDM_FILTER_RED,   L"红色");
     AppendMenu(hFilterMenu, MF_STRING | (note.hasFilter && note.filterColor == FILTER_GREEN ? MF_CHECKED : 0), IDM_FILTER_GREEN, L"绿色");
     AppendMenu(hFilterMenu, MF_STRING | (note.hasFilter && note.filterColor == FILTER_BLUE  ? MF_CHECKED : 0), IDM_FILTER_BLUE,  L"蓝色");
     AppendMenu(hFilterMenu, MF_STRING | (note.hasFilter && note.filterColor == FILTER_WARM  ? MF_CHECKED : 0), IDM_FILTER_WARM,  L"暖黄");
     AppendMenu(hFilterMenu, MF_STRING | (note.hasFilter && note.filterColor == FILTER_GRAY  ? MF_CHECKED : 0), IDM_FILTER_GRAY,  L"灰度");
-    AppendMenu(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hFilterMenu), L"滤镜颜色");
+    AppendMenu(hFilterMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hFilterMenu, MF_STRING | (note.useHueWarning ? MF_CHECKED : 0), IDM_FILTER_HUE_WARNING, L"色相渐变警戒色标");
+    AppendMenu(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hFilterMenu), L"滤镜（颜色 / 警戒色标）");
     
     AppendMenu(hMenu, MF_STRING | (note.paused ? MF_CHECKED : 0), IDM_PAUSE_RESUME,
                note.paused ? L"继续预览" : L"暂停预览");
@@ -410,23 +538,29 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             DeleteObject(pen);
             
             // 颜色滤镜（半透明覆盖在画面上）
-            if (note && note->hasFilter) {
+            if (note && (note->hasFilter || note->useHueWarning)) {
                 int fw = reg.right - reg.left;
                 int fh = reg.bottom - reg.top;
-                HDC mem = CreateCompatibleDC(hdc);
-                HBITMAP cb = CreateCompatibleBitmap(hdc, fw, fh);
-                HBITMAP oldBmp = (HBITMAP)SelectObject(mem, cb);
-                HBRUSH fb = CreateSolidBrush(note->filterColor);
-                RECT frc = { 0, 0, fw, fh };
-                FillRect(mem, &frc, fb);
-                DeleteObject(fb);
-                BLENDFUNCTION bf = {};
-                bf.BlendOp = AC_SRC_OVER;
-                bf.SourceConstantAlpha = FILTER_ALPHA;
-                AlphaBlend(hdc, reg.left, reg.top, fw, fh, mem, 0, 0, fw, fh, bf);
-                SelectObject(mem, oldBmp);
-                DeleteObject(cb);
-                DeleteDC(mem);
+                if (fw > 0 && fh > 0) {
+                    // 取覆盖色：普通滤镜用固定色；警戒色标用当前警戒级别映射的颜色
+                    COLORREF color = note->hasFilter ? note->filterColor
+                                                     : HueColorFromLevel(note->warningLevel);
+                    BYTE alpha = note->useHueWarning ? 120 : FILTER_ALPHA;  // 警戒色标更明显些
+                    HDC mem = CreateCompatibleDC(hdc);
+                    HBITMAP cb = CreateCompatibleBitmap(hdc, fw, fh);
+                    HBITMAP oldBmp = (HBITMAP)SelectObject(mem, cb);
+                    HBRUSH fb = CreateSolidBrush(color);
+                    RECT frc = { 0, 0, fw, fh };
+                    FillRect(mem, &frc, fb);
+                    DeleteObject(fb);
+                    BLENDFUNCTION bf = {};
+                    bf.BlendOp = AC_SRC_OVER;
+                    bf.SourceConstantAlpha = alpha;
+                    AlphaBlend(hdc, reg.left, reg.top, fw, fh, mem, 0, 0, fw, fh, bf);
+                    SelectObject(mem, oldBmp);
+                    DeleteObject(cb);
+                    DeleteDC(mem);
+                }
             }
             
             // 状态横幅（停滞 / 暂停）
@@ -520,6 +654,9 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 case IDM_FILTER_BLUE:  SetFilter(*note, FILTER_BLUE, true);     break;
                 case IDM_FILTER_WARM:  SetFilter(*note, FILTER_WARM, true);     break;
                 case IDM_FILTER_GRAY:  SetFilter(*note, FILTER_GRAY, true);     break;
+                case IDM_FILTER_HUE_WARNING:
+                    SetHueWarning(*note, !note->useHueWarning);
+                    break;
                 case IDM_PAUSE_RESUME:
                     TogglePause(*note);
                     break;

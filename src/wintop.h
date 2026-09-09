@@ -62,6 +62,16 @@ extern int g_minimizedWaitMs;
 #define IDM_FILTER_BLUE             3015
 #define IDM_FILTER_WARM             3016
 #define IDM_FILTER_GRAY             3017
+#define IDM_FILTER_HUE_WARNING      3018
+
+// ─── 设置：警戒色标采样次数（到达最高警戒级别所需的无变化采样次数） ───
+#define IDM_WARN_3    3301
+#define IDM_WARN_5    3302
+#define IDM_WARN_8    3303
+#define IDM_WARN_12   3304
+#define IDM_WARN_20   3305
+#define IDM_WARN_40   3306
+extern int g_warningSamples;
 
 // ─── 裁剪菜单 ID ───
 #define IDM_CROP                    3201
@@ -93,6 +103,12 @@ struct StickyNote {
     // 滤镜
     bool hasFilter;                     // 是否启用颜色滤镜
     COLORREF filterColor;               // 滤镜颜色
+
+    // 色相渐变警戒色标
+    bool useHueWarning;                 // 是否启用警戒色标滤镜
+    float warningLevel;                 // 当前警戒级别 0(安全)..1(最高警戒)
+    BYTE* diffBuf;                      // 上一采样缩略亮度帧（用于对比画面变化）
+    int diffW, diffH;                   // 缩略帧尺寸
     
     // 状态
     bool isStale;                       // 是否停滞（目标窗口失去响应）
@@ -105,6 +121,8 @@ struct StickyNote {
                    hasCrop(false), cropRect{0,0,0,0}, cropping(false),
                    cropStart{0,0}, cropCur{0,0},
                    hasFilter(false), filterColor(0),
+                   useHueWarning(false), warningLevel(0.0f),
+                   diffBuf(nullptr), diffW(0), diffH(0),
                    isStale(false), paused(false), refreshIntervalSec(5),
                    refreshTimerId(0) {}
 };
