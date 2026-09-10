@@ -263,16 +263,17 @@ static void UpdateHueWarning(StickyNote& note) {
         }
     }
     
-    // 与上一帧缩略图对比，计算变化量 0..1
+    // 与上一帧缩略图对比，计算变化量 0..1：变化像素占比（亮度差 >= 阈值）
     double diff = 1.0;   // 首帧默认视为有变化（安全）
     if (note.diffBuf && note.diffW == kDiffWidth && note.diffH == DH) {
-        long long sum = 0;
+        int changed = 0;
+        const int threshold = 8;   // 亮度变化 >= 8 视为该像素已变
         for (int i = 0; i < n; ++i) {
             int d = cur[i] - note.diffBuf[i];
             if (d < 0) d = -d;
-            sum += d;
+            if (d >= threshold) changed++;
         }
-        diff = sum / (double)n / 255.0;
+        diff = (double)changed / (double)n;   // 0..1 变化像素比例
     }
     
     // 需要先扩容/建缓存
@@ -284,11 +285,17 @@ static void UpdateHueWarning(StickyNote& note) {
     }
     memcpy(note.diffBuf, cur.data(), (size_t)n);
     
-    // 指数平滑逼近目标：目标 = 1 - 变化量。g_warningSamples 越大，到达最高警戒越慢
+    // 上升（静止→警戒）用缓慢指数平滑；下降（检测到变化）直接拉回安全区
     double target = 1.0 - diff;
-    int k = (g_warningSamples > 0) ? g_warningSamples : 8;
-    double alpha = 1.0 - std::exp(-1.0 / k);
-    note.warningLevel = (float)(note.warningLevel + (target - note.warningLevel) * alpha);
+    if (target < note.warningLevel) {
+        // 画面有变化：立刻跳到安全值 0.2（接近绿），不再缓慢下降
+        note.warningLevel = 0.2f;
+    } else {
+        // 画面持续静止：缓慢向上爬升
+        int k = (g_warningSamples > 0) ? g_warningSamples : 8;
+        double alpha = 1.0 - std::exp(-1.0 / k);
+        note.warningLevel = (float)(note.warningLevel + (target - note.warningLevel) * alpha);
+    }
     if (note.warningLevel < 0.0f) note.warningLevel = 0.0f;
     if (note.warningLevel > 1.0f) note.warningLevel = 1.0f;
 }
