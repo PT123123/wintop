@@ -13,6 +13,9 @@
 
 // 前置声明（定义在文件后部）
 static void FreeHueWarningBuf(StickyNote& note);
+static float ComputeFrameDiff(StickyNote& note, bool& isFirst);
+static void ApplyHueWarning(StickyNote& note, float diff);
+static void ApplyActivity(StickyNote& note, float diff, bool isFirst);
 
 #define STICKY_WIDTH    360
 #define STICKY_HEIGHT   260
@@ -142,6 +145,11 @@ void BindStickyNoteToWindow(StickyNote& note, HWND targetHwnd) {
     if (bmp) {
         if (note.frame) DeleteObject(note.frame);
         note.frame = bmp;
+        // 建立帧变化指标缓存（警戒色标 / 聚合频率）
+        bool isFirst = false;
+        float diff = ComputeFrameDiff(note, isFirst);
+        if (note.useHueWarning) ApplyHueWarning(note, diff);
+        ApplyActivity(note, diff, isFirst);
     }
     
     InvalidateRect(note.hwnd, nullptr, TRUE);
@@ -177,23 +185,22 @@ static void SetFilter(StickyNote& note, COLORREF color, bool hasFilter) {
     note.filterColor = color;
     note.hasFilter = hasFilter;
     note.useHueWarning = false;
-    FreeHueWarningBuf(note);
+    note.warningLevel = 0.0f;
     InvalidateRect(note.hwnd, nullptr, TRUE);
 }
 
-// 启用/停用"色相渐变警戒色标"
+// 启用/停用"色相渐变警戒色标"（diffBuf 同时服务于聚合频率指标，不再随滤镜释放）
 static void SetHueWarning(StickyNote& note, bool on) {
     note.useHueWarning = on;
     note.hasFilter = false;
     note.warningLevel = 0.0f;
-    if (!on) { FreeHueWarningBuf(note); }
     InvalidateRect(note.hwnd, nullptr, TRUE);
 }
 
 // ─── 色相渐变警戒色标：由画面变化程度计算警戒颜色 ───
 
 // HSB -> RGB
-static COLORREF HSBtoRGB(double h, double s, double v) {
+COLORREF HSBtoRGB(double h, double s, double v) {
     double r = 0, g = 0, b = 0;
     h = std::fmod(h, 360.0); if (h < 0) h += 360.0;
     int i = (int)(h / 60) % 6;
@@ -218,15 +225,23 @@ static COLORREF HueColorFromLevel(float level) {
     return HSBtoRGB(h, 0.82, 0.92);
 }
 
-// 把当前帧缩成 48 宽的单通道亮度缩略帧，与上一帧对比变化量并更新警戒级别
+// 更新频率等级 activity(0..1) -> 色相：低频为蓝(240°)，随等级升高向红(0°)渐变，高频为红
+COLORREF HueFromActivity(float a) {
+    double h = (1.0 - a) * 240.0;       // 0 -> 蓝，1 -> 红
+    return HSBtoRGB(h, 0.80, 0.92);
+}
+
+// ─── 帧变化指标（驱动“色相渐变警戒色标”与“聚合排序更新频率”） ───
 static const int kDiffWidth = 48;
 
-static void UpdateHueWarning(StickyNote& note) {
-    if (!note.useHueWarning || !note.frame) return;
+// 把当前帧缩成 48 宽的单通道亮度缩略帧，与上一采样帧对比，返回变化像素占比 0..1
+// isFirst 表示这是首帧（无上一采样帧可比，默认视为有变化）。同时更新缩略帧缓存。
+static float ComputeFrameDiff(StickyNote& note, bool& isFirst) {
+    if (!note.frame) return 0.0f;
     
     BITMAP bm;
     GetObject(note.frame, sizeof(bm), &bm);
-    if (bm.bmWidth <= 0 || bm.bmHeight <= 0) return;
+    if (bm.bmWidth <= 0 || bm.bmHeight <= 0) return 0.0f;
     int DH = (int)((long long)bm.bmHeight * kDiffWidth / bm.bmWidth);
     if (DH < 1) DH = 1;
     int n = kDiffWidth * DH;
@@ -264,8 +279,10 @@ static void UpdateHueWarning(StickyNote& note) {
     }
     
     // 与上一帧缩略图对比，计算变化量 0..1：变化像素占比（亮度差 >= 阈值）
-    double diff = 1.0;   // 首帧默认视为有变化（安全）
-    if (note.diffBuf && note.diffW == kDiffWidth && note.diffH == DH) {
+    bool bufValid = (note.diffBuf && note.diffW == kDiffWidth && note.diffH == DH);
+    isFirst = !bufValid;
+    float diff = 1.0f;   // 首帧默认视为有变化（安全）
+    if (bufValid) {
         int changed = 0;
         const int threshold = 8;   // 亮度变化 >= 8 视为该像素已变
         for (int i = 0; i < n; ++i) {
@@ -273,18 +290,21 @@ static void UpdateHueWarning(StickyNote& note) {
             if (d < 0) d = -d;
             if (d >= threshold) changed++;
         }
-        diff = (double)changed / (double)n;   // 0..1 变化像素比例
+        diff = (float)changed / (float)n;   // 0..1 变化像素比例
     }
     
-    // 需要先扩容/建缓存
-    if (!note.diffBuf || note.diffW != kDiffWidth || note.diffH != DH) {
+    if (!bufValid) {
         if (note.diffBuf) delete[] note.diffBuf;
         note.diffBuf = new BYTE[n];
         note.diffW = kDiffWidth;
         note.diffH = DH;
     }
     memcpy(note.diffBuf, cur.data(), (size_t)n);
-    
+    return diff;
+}
+
+// 由 diff 更新“色相渐变警戒色标”的警戒级别
+static void ApplyHueWarning(StickyNote& note, float diff) {
     // 上升（静止→警戒）用缓慢指数平滑；下降（检测到变化）直接拉回安全区
     double target = 1.0 - diff;
     if (target < note.warningLevel) {
@@ -298,6 +318,15 @@ static void UpdateHueWarning(StickyNote& note) {
     }
     if (note.warningLevel < 0.0f) note.warningLevel = 0.0f;
     if (note.warningLevel > 1.0f) note.warningLevel = 1.0f;
+}
+
+// 由 diff 更新“更新频率等级”（EMA 平滑，τ≈10s；首帧无对比基础，置 0）
+static void ApplyActivity(StickyNote& note, float diff, bool isFirst) {
+    if (isFirst) { note.activityScore = 0.0f; return; }
+    double alpha = 1.0 - std::exp(-note.refreshIntervalSec / 10.0);
+    note.activityScore = (float)(note.activityScore + (diff - note.activityScore) * alpha);
+    if (note.activityScore < 0.0f) note.activityScore = 0.0f;
+    if (note.activityScore > 1.0f) note.activityScore = 1.0f;
 }
 
 // ─── 裁剪相关 ───
@@ -382,6 +411,7 @@ static void TogglePause(StickyNote& note) {
         SetRefreshTimer(note);
         InvalidateRect(note.hwnd, nullptr, TRUE);
     }
+    if (note.docked) DockRelayout();   // 暂停/继续影响排序键（暂停视为低频）
 }
 
 // ─── 每次刷新：抓一帧新画面（对最小化窗口先恢复再抓再最小化） ───
@@ -410,7 +440,11 @@ static void RefreshFrame(StickyNote& note) {
         if (bmp) {
             if (note.frame) DeleteObject(note.frame);
             note.frame = bmp;
-            if (note.useHueWarning) UpdateHueWarning(note);   // 采集到位后更新警戒级别
+            // 统一计算帧变化指标：驱动警戒色标与聚合排序频率
+            bool isFirst = false;
+            float diff = ComputeFrameDiff(note, isFirst);
+            if (note.useHueWarning) ApplyHueWarning(note, diff);
+            ApplyActivity(note, diff, isFirst);
             InvalidateRect(note.hwnd, nullptr, TRUE);
         }
     }
@@ -436,6 +470,7 @@ static void OnRefreshTimer(StickyNote& note) {
     if (note.isStale != wasStale) {
         InvalidateRect(note.hwnd, nullptr, TRUE);
     }
+    if (note.docked) DockRelayout();   // 停滞状态变化影响排序键
 }
 
 // ─── 设置刷新间隔 ───
@@ -474,6 +509,9 @@ static void ShowContextMenu(HWND hwnd, StickyNote& note) {
     
     AppendMenu(hMenu, MF_STRING | (note.paused ? MF_CHECKED : 0), IDM_PAUSE_RESUME,
                note.paused ? L"继续预览" : L"暂停预览");
+    AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenu(hMenu, MF_STRING, IDM_DOCK_TOGGLE,
+               note.docked ? L"移出聚合栏（保持悬浮）" : L"加入聚合栏（自动排序）");
     AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenu(hMenu, MF_STRING, IDM_CROP, note.hasCrop ? L"重新裁剪" : L"裁剪");
     if (note.hasCrop) {
@@ -570,6 +608,15 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 }
             }
             
+            // 聚合模式：底部显示更新频率色条（低频蓝 → 高频红）
+            if (note && note->docked) {
+                float a = (note->paused || note->isStale) ? 0.0f : note->activityScore;
+                HBRUSH ab = CreateSolidBrush(HueFromActivity(a));
+                RECT strip = { reg.left, reg.bottom - 4, reg.right, reg.bottom };
+                FillRect(hdc, &strip, ab);
+                DeleteObject(ab);
+            }
+            
             // 状态横幅（停滞 / 暂停）
             if (note) {
                 HFONT oldFont = (HFONT)SelectObject(hdc, g_hFont);
@@ -600,19 +647,40 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 sel.left = max(sel.left, reg.left);   sel.top = max(sel.top, reg.top);
                 sel.right = min(sel.right, reg.right); sel.bottom = min(sel.bottom, reg.bottom);
                 
-                // 外圈暗化（四块）
-                HBRUSH overlay = CreateSolidBrush(RGB(20, 20, 20));
-                RECT strips[] = {
-                    { reg.left, reg.top, sel.right, sel.top },
-                    { reg.left, sel.top, sel.left, sel.bottom },
-                    { sel.right, sel.top, reg.right, sel.bottom },
-                    { reg.left, sel.bottom, reg.right, reg.bottom }
-                };
-                for (auto& s : strips) {
-                    if (s.right > s.left && s.bottom > s.top) FillRect(hdc, &s, overlay);
+                // 外圈暗化：半透明黑覆盖整个预览区（内容仍可辨识，方便定位裁剪框）
+                if (sel.right > sel.left && sel.bottom > sel.top) {
+                    int fw = reg.right - reg.left;
+                    int fh = reg.bottom - reg.top;
+                    HDC mem = CreateCompatibleDC(hdc);
+                    HBITMAP cb = CreateCompatibleBitmap(hdc, fw, fh);
+                    HBITMAP oldBmp = (HBITMAP)SelectObject(mem, cb);
+                    HBRUSH fb = CreateSolidBrush(RGB(0, 0, 0));
+                    RECT frc = { 0, 0, fw, fh };
+                    FillRect(mem, &frc, fb);
+                    DeleteObject(fb);
+                    BLENDFUNCTION bf = {};
+                    bf.BlendOp = AC_SRC_OVER;
+                    bf.SourceConstantAlpha = 110;
+                    AlphaBlend(hdc, reg.left, reg.top, fw, fh, mem, 0, 0, fw, fh, bf);
+                    SelectObject(mem, oldBmp);
+                    DeleteObject(cb);
+                    DeleteDC(mem);
+
+                    // 把选区内的帧画面原样补画回来，选区保持清晰
+                    if (note->frame) {
+                        HDC hdcMem = CreateCompatibleDC(hdc);
+                        HBITMAP old = (HBITMAP)SelectObject(hdcMem, note->frame);
+                        POINT a = ClientToFrame(*note, { sel.left, sel.top });
+                        POINT d = ClientToFrame(*note, { sel.right, sel.bottom });
+                        SetStretchBltMode(hdc, COLORONCOLOR);
+                        StretchBlt(hdc, sel.left, sel.top,
+                                   sel.right - sel.left, sel.bottom - sel.top,
+                                   hdcMem, a.x, a.y, d.x - a.x, d.y - a.y, SRCCOPY);
+                        SelectObject(hdcMem, old);
+                        DeleteDC(hdcMem);
+                    }
                 }
-                DeleteObject(overlay);
-                
+
                 // 选区高亮边框
                 HPEN selPen = CreatePen(PS_DOT, 1, RGB(255, 255, 255));
                 SelectObject(hdc, selPen);
@@ -666,6 +734,10 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                     break;
                 case IDM_PAUSE_RESUME:
                     TogglePause(*note);
+                    break;
+                case IDM_DOCK_TOGGLE:
+                    if (note->docked) UndockNote(*note, true);
+                    else DockNote(*note);
                     break;
                 case IDM_CROP:
                     BeginCrop(*note);
@@ -736,9 +808,28 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             break;
         }
         
+        case WM_EXITSIZEMOVE: {
+            // 聚合模式下手动拖走便签：偏离槽位则出坞（保留当前位置）
+            if (note && note->docked) {
+                RECT rc;
+                GetWindowRect(hwnd, &rc);
+                LONG cx = (rc.left + rc.right) / 2;
+                LONG cy = (rc.top + rc.bottom) / 2;
+                LONG sx = (note->dockSlotRect.left + note->dockSlotRect.right) / 2;
+                LONG sy = (note->dockSlotRect.top + note->dockSlotRect.bottom) / 2;
+                LONG dx = cx > sx ? cx - sx : sx - cx;
+                LONG dy = cy > sy ? cy - sy : sy - cy;
+                if (dx + dy > 40) {
+                    UndockNote(*note, false);
+                }
+            }
+            return 0;
+        }
+        
         case WM_CLOSE: {
             if (note) {
                 HWND self = note->hwnd;
+                bool wasDocked = note->docked;
                 if (note->refreshTimerId) {
                     KillTimer(self, note->refreshTimerId);
                     note->refreshTimerId = 0;
@@ -750,6 +841,7 @@ LRESULT CALLBACK StickyNoteWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 note->hwnd = nullptr;
                 g_stickyNotes.erase(self);
                 DestroyWindow(self);
+                if (wasDocked) DockRelayout();   // 重新铺排剩余便签
             }
             return 0;
         }

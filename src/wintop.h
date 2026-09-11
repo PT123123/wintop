@@ -37,6 +37,7 @@
 #define IDM_TRAY_EXIT               2004
 #define IDM_TRAY_RESTART_ADMIN      2005
 #define IDM_TRAY_SETTINGS           2006
+#define IDM_TRAY_TOGGLE_DOCK        2007
 
 // ─── 设置：最小化恢复抓帧等待时长（毫秒） ───
 #define IDM_WAIT_50     3101
@@ -80,6 +81,10 @@ extern int g_warningSamples;
 // ─── 悬浮图标菜单 ID ───
 #define IDM_ICON_HIDE               3020
 
+// ─── 便签聚合菜单 ID ───
+#define IDM_DOCK_TOGGLE             3021
+#define IDM_DOCK_EJECT_ALL          3022
+
 // ─── 托盘图标 ID ───
 #define IDI_TRAY_ICON               4001
 
@@ -115,6 +120,14 @@ struct StickyNote {
     bool paused;                        // 是否暂停（冻结画面）
     int refreshIntervalSec;             // 该便签的刷新间隔（秒）
     UINT_PTR refreshTimerId;            // 该便签的刷新定时器 ID
+
+    // 聚合排序
+    bool docked;                        // 是否已入坞（聚合模式）
+    LONG savedStyle;                    // 入坞前的窗口样式（出坞时恢复）
+    LONG savedExStyle;                  // 入坞前的扩展样式
+    RECT dockRestoreRect;               // 入坞前的窗口几何（出坞恢复位置用）
+    RECT dockSlotRect;                  // 当前槽位（屏幕坐标）
+    float activityScore;                // 更新频率等级 0(低频)..1(高频)，EMA 平滑
     
     StickyNote() : hwnd(nullptr), targetHwnd(nullptr),
                    frame(nullptr), filterWnd(nullptr),
@@ -124,7 +137,10 @@ struct StickyNote {
                    useHueWarning(false), warningLevel(0.0f),
                    diffBuf(nullptr), diffW(0), diffH(0),
                    isStale(false), paused(false), refreshIntervalSec(5),
-                   refreshTimerId(0) {}
+                   refreshTimerId(0),
+                   docked(false), savedStyle(0), savedExStyle(0),
+                   dockRestoreRect{0,0,0,0}, dockSlotRect{0,0,0,0},
+                   activityScore(0.0f) {}
 };
 
 struct WindowInfo {
@@ -166,6 +182,17 @@ HWND CreateControlPanel(HWND hOwner);
 void ShowControlPanel();
 void HideControlPanel();
 void DestroyControlPanel();
+
+// StickyNote.cpp：颜色工具（供聚合条图例使用）
+COLORREF HSBtoRGB(double h, double s, double v);
+COLORREF HueFromActivity(float a);
+
+// Dock.cpp：聚合模式（悬浮条 + 按更新频率自动排序）
+bool IsDockEnabled();
+void ToggleDock();
+void DockNote(StickyNote& note);
+void UndockNote(StickyNote& note, bool restorePos);
+void DockRelayout();
 
 // Main.cpp
 void RegisterHotKeys(HWND hwnd);

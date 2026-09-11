@@ -119,6 +119,11 @@ void CreateAndBindStickyNote(HWND targetHwnd) {
     }
     
     g_stickyNotes[stickyHwnd] = std::move(note);
+
+    // 聚合模式下新建便签自动入坞
+    if (IsDockEnabled()) {
+        DockNote(*g_stickyNotes[stickyHwnd]);
+    }
 }
 
 // ─── 销毁所有便签 ───
@@ -172,6 +177,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 HMENU hMenu = CreatePopupMenu();
                 AppendMenu(hMenu, MF_STRING, IDM_TRAY_OPEN_PICKER, L"新建预览便签");
                 AppendMenu(hMenu, MF_STRING, IDM_TRAY_SHOW_PANEL, L"显示悬浮图标");
+                AppendMenu(hMenu, MF_STRING | (IsDockEnabled() ? MF_CHECKED : 0),
+                           IDM_TRAY_TOGGLE_DOCK, L"聚合模式（自动排序）");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
                 AppendMenu(hMenu, MF_STRING, IDM_TRAY_DESTROY_ALL, L"关闭所有便签");
                 AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
@@ -201,6 +208,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     break;
                 case IDM_TRAY_SHOW_PANEL:
                     ShowControlPanel();
+                    break;
+                case IDM_TRAY_TOGGLE_DOCK:
+                    ToggleDock();
                     break;
                 case IDM_TRAY_DESTROY_ALL:
                     DestroyAllStickyNotes();
